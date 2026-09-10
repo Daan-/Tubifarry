@@ -26,7 +26,7 @@ public interface IPlaylistExportService
 
 public sealed partial class PlaylistExportService : IPlaylistExportService,
     IHandleAsync<ApplicationStartedEvent>,
-    IHandleAsync<ImportListSyncCompleteEvent>,
+    IHandleAsync<CommandExecutedEvent>,
     IHandleAsync<ProviderAddedEvent<IImportList>>,
     IHandleAsync<ProviderUpdatedEvent<IImportList>>,
     IHandleAsync<ProviderDeletedEvent<IImportList>>
@@ -69,16 +69,22 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
     public void HandleAsync(ApplicationStartedEvent message) => RefreshSchema();
 
     /// <summary>
-    /// Regenerates on the import list sync, which is the only periodic hook a plugin has.
+    /// Regenerates off the command heartbeat, the only periodic hook a plugin has.
     /// </summary>
     /// <remarks>
     /// A plugin cannot register a scheduled task: TaskManager builds its list from a fixed
     /// set of command types on startup and deletes any stored task outside it. Without this
     /// the playlists only ever refresh when an album is imported, which on a settled library
-    /// is close to never. The minimum interval keeps the five-minute sync from generating
-    /// every time.
+    /// is close to never.
+    ///
+    /// CommandExecutedEvent rather than ImportListSyncCompleteEvent, which looks like the
+    /// natural hook but is not published when a sync has nothing to process, and a sync has
+    /// nothing to process whenever every list is inside its refresh interval. This one is
+    /// published from a finally for every command, so RefreshMonitoredDownloads alone gives
+    /// a tick a minute. The minimum interval is what makes that affordable, and it is
+    /// claimed before the work starts so two ticks cannot generate at once.
     /// </remarks>
-    public void HandleAsync(ImportListSyncCompleteEvent message)
+    public void HandleAsync(CommandExecutedEvent message)
     {
         foreach (PlaylistExportNotification notification in _notificationFactory.Value
             .GetAvailableProviders().OfType<PlaylistExportNotification>())
