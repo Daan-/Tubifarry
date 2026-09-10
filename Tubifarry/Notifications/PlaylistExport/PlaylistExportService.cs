@@ -9,6 +9,7 @@ using NzbDrone.Core.Notifications;
 using NzbDrone.Core.Parser.Model;
 using NzbDrone.Core.ThingiProvider.Events;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Tubifarry.Core.Model;
 using Tubifarry.Core.Utilities;
@@ -94,6 +95,31 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
         RefreshSchema();
     }
 
+    /// <summary>
+    /// Converts a dynamic field value to a bool.
+    /// </summary>
+    /// <remarks>
+    /// Values arriving from the API are deserialised as <see cref="JsonElement"/>, which does not
+    /// implement IConvertible, so Convert.ToBoolean throws InvalidCastException and saving the
+    /// notification fails from both the UI and the API.
+    /// </remarks>
+    private static bool ToBoolean(object? value) => value switch
+    {
+        null => false,
+        bool b => b,
+        JsonElement e => e.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Null or JsonValueKind.Undefined => false,
+            JsonValueKind.String => bool.TryParse(e.GetString(), out bool parsed) && parsed,
+            JsonValueKind.Number => e.TryGetInt64(out long n) && n != 0,
+            _ => false,
+        },
+        string s => bool.TryParse(s, out bool parsed) && parsed,
+        _ => Convert.ToBoolean(value),
+    };
+
     public void RefreshSchema()
     {
         List<IImportList> allLists = _importListFactory.GetAvailableProviders();
@@ -117,7 +143,7 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
                 },
                 PropertyType = typeof(bool),
                 GetterFunc = m => ((PlaylistExportSettings)m).GetBoolState(key),
-                SetterFunc = (m, v) => ((PlaylistExportSettings)m).SetBoolState(key, Convert.ToBoolean(v)),
+                SetterFunc = (m, v) => ((PlaylistExportSettings)m).SetBoolState(key, ToBoolean(v)),
             });
         }
 
