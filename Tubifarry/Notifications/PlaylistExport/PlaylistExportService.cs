@@ -26,11 +26,13 @@ public interface IPlaylistExportService
 
 public sealed partial class PlaylistExportService : IPlaylistExportService,
     IHandleAsync<ApplicationStartedEvent>,
+    IHandleAsync<ImportListSyncCompleteEvent>,
     IHandleAsync<ProviderAddedEvent<IImportList>>,
     IHandleAsync<ProviderUpdatedEvent<IImportList>>,
     IHandleAsync<ProviderDeletedEvent<IImportList>>
 {
     private const string SnapshotKey = "playlistExport.snapshots";
+    private const string LastGeneratedKey = "playlistExport.lastGenerated";
 
     private readonly IImportListFactory _importListFactory;
     private readonly IFetchAndParseImportList _fetchAndParse;
@@ -65,6 +67,25 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
     }
 
     public void HandleAsync(ApplicationStartedEvent message) => RefreshSchema();
+
+    /// <summary>
+    /// Regenerates on the import list sync, which is the only periodic hook a plugin has.
+    /// </summary>
+    /// <remarks>
+    /// A plugin cannot register a scheduled task: TaskManager builds its list from a fixed
+    /// set of command types on startup and deletes any stored task outside it. Without this
+    /// the playlists only ever refresh when an album is imported, which on a settled library
+    /// is close to never. The minimum interval keeps the five-minute sync from generating
+    /// every time.
+    /// </remarks>
+    public void HandleAsync(ImportListSyncCompleteEvent message)
+    {
+        foreach (PlaylistExportNotification notification in _notificationFactory.Value
+            .GetAvailableProviders().OfType<PlaylistExportNotification>())
+        {
+            GeneratePlaylists((PlaylistExportSettings)notification.Definition.Settings);
+        }
+    }
     public void HandleAsync(ProviderAddedEvent<IImportList> message) => RefreshSchema();
     public void HandleAsync(ProviderUpdatedEvent<IImportList> message) => RefreshSchema();
 
@@ -141,7 +162,7 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
     public void RefreshSchema()
     {
         List<IImportList> allLists = _importListFactory.GetAvailableProviders();
-        int order = 6;
+        int order = 7;
 
         List<FieldMapping> dynamicMappings = [];
         foreach (IImportList l in allLists)
@@ -208,6 +229,9 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
 
     public void GeneratePlaylists(PlaylistExportSettings settings)
     {
+        if (!DueForGeneration(settings))
+            return;
+
         string? outputPath = settings.AutoDetectOutputPath
             ? DetectCommonMusicPath()
             : settings.OutputPath;
@@ -391,14 +415,27 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
     private static string Normalize(string? s) =>
         s == null ? "" : NormalizeRegex().Replace(s.ToLowerInvariant(), "");
 
+    // No BOM: players match the first line against "#EXTM3U" literally, and
+    // Encoding.UTF8 puts three bytes in front of it. Roon ignores such a file.
+    private static readonly UTF8Encoding _utf8NoBom = new(false);
+
     private void WriteM3u8(string outputPath, string listName, List<TrackFile> files, bool useRelative)
     {
+        List<TrackFile> present = files.Where(f => File.Exists(f.Path)).ToList();
+        if (present.Count == 0)
+        {
+            // A playlist whose tracks are all missing locally would otherwise be
+            // written as a header and imported as an empty playlist.
+            _logger.Debug($"Skipping '{listName}': no local files for any of its {files.Count} track(s)");
+            return;
+        }
+
         string filename = SanitizeFilename(listName) + ".m3u8";
         string fullPath = Path.Combine(outputPath, filename);
 
         List<string> lines = ["#EXTM3U", $"#PLAYLIST:{listName}"];
 
-        foreach (TrackFile tf in files.Where(f => File.Exists(f.Path)))
+        foreach (TrackFile tf in present)
         {
             string displayName = Path.GetFileNameWithoutExtension(tf.Path);
             string trackPath = useRelative
@@ -408,8 +445,8 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
             lines.Add(trackPath);
         }
 
-        File.WriteAllLines(fullPath, lines, Encoding.UTF8);
-        _logger.Info($"Written {files.Count} track(s) to '{fullPath}'");
+        File.WriteAllLines(fullPath, lines, _utf8NoBom);
+        _logger.Info($"Written {present.Count} track(s) to '{fullPath}'");
     }
 
     private static string? FindCommonRoot(List<string> paths)
@@ -435,6 +472,19 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
 
         string root = string.Join(Path.DirectorySeparatorChar, common);
         return common[0].EndsWith(':') ? root + Path.DirectorySeparatorChar : root;
+    }
+
+    private bool DueForGeneration(PlaylistExportSettings settings)
+    {
+        long lastTicks = _pluginSettings.GetValue<long>(LastGeneratedKey);
+        DateTime last = lastTicks == 0 ? DateTime.MinValue : new DateTime(lastTicks, DateTimeKind.Utc);
+        TimeSpan interval = TimeSpan.FromHours(Math.Max(settings.MinimumInterval, 0));
+
+        if (DateTime.UtcNow - last < interval)
+            return false;
+
+        _pluginSettings.SetValue(LastGeneratedKey, DateTime.UtcNow.Ticks);
+        return true;
     }
 
     private Dictionary<int, PlaylistSnapshot> GetSnapshots() =>
