@@ -248,6 +248,17 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
             : FetchAlbumLevelItems(list);
 
         Dictionary<int, PlaylistSnapshot> snapshots = GetSnapshots();
+
+        // AIDEV-NOTE: the track sources catch their own errors and return an empty list, so
+        // a Spotify timeout looks exactly like an emptied list. Storing it replaced a good
+        // snapshot and blocked generation for a full refresh interval. Keeping the old one
+        // leaves its FetchedAt stale, so the next generation fetches again.
+        if (items.Count == 0 && snapshots.TryGetValue(listId, out PlaylistSnapshot? previous) && previous.Items.Count > 0)
+        {
+            _logger.Warn($"'{list.Definition.Name}' returned no items, keeping the {previous.Items.Count} stored at {previous.FetchedAt:u}");
+            return;
+        }
+
         snapshots[listId] = new PlaylistSnapshot(list.Definition.Name, items, DateTime.UtcNow);
         SaveSnapshots(snapshots);
 
@@ -387,7 +398,10 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
             return snapshot;
         }
 
-        if (snapshot != null && DateTime.UtcNow - snapshot.FetchedAt < list.MinRefreshInterval)
+        // An empty snapshot is more likely a failed fetch than an empty list, so it is
+        // retried on the next generation rather than trusted for a whole refresh interval.
+        if (snapshot != null && snapshot.Items.Count > 0
+            && DateTime.UtcNow - snapshot.FetchedAt < list.MinRefreshInterval)
             return snapshot;
 
         FetchAndStore(listId);
