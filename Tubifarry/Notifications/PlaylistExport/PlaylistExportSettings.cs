@@ -37,7 +37,42 @@ public class PlaylistExportSettings : DynamicStateSettings
     [FieldDefinition(6, Label = "Minimum Interval", Type = FieldType.Textbox, Unit = "hours", Advanced = true, HelpText = "Shortest time between two generations. Generation compares every item of every selected list against the library, so it is not run on each import or each list sync.", Placeholder = "6")]
     public double MinimumInterval { get; set; } = 6.0;
 
+    // Per-list name prefixes, keyed by import list id. Strings, so they cannot share
+    // StateJson, which is a bool map. The visible list_N_prefix fields read and write it.
+    [FieldDefinition(7, Label = "Prefixes", Type = FieldType.Textbox, Hidden = HiddenType.Hidden)]
+    public string PrefixJson { get; set; } = "{}";
+
     public PlaylistTrackMode GetTrackMode() => (PlaylistTrackMode)TrackMode;
+
+    private Dictionary<string, string> GetPrefixes() =>
+        JsonSerializer.Deserialize<Dictionary<string, string>>(
+            string.IsNullOrEmpty(PrefixJson) ? "{}" : PrefixJson) ?? [];
+
+    public string GetPrefix(int listId) =>
+        GetPrefixes().GetValueOrDefault(listId.ToString()) ?? "";
+
+    public void SetPrefix(int listId, string? prefix)
+    {
+        Dictionary<string, string> prefixes = GetPrefixes();
+        string trimmed = prefix?.Trim() ?? "";
+
+        if (trimmed.Length == 0)
+            prefixes.Remove(listId.ToString());
+        else
+            prefixes[listId.ToString()] = trimmed;
+
+        PrefixJson = JsonSerializer.Serialize(prefixes);
+    }
+
+    /// <summary>
+    /// Name a playlist gets on disk and in its #PLAYLIST line: the source playlist's name,
+    /// behind the list's prefix when one is set.
+    /// </summary>
+    public string PrefixedName(int listId, string playlistName)
+    {
+        string prefix = GetPrefix(listId);
+        return prefix.Length == 0 ? playlistName : $"{prefix} - {playlistName}";
+    }
 
     public IEnumerable<int> GetSelectedListIds()
     {

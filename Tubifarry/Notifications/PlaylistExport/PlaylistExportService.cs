@@ -110,7 +110,8 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
                 if (!s.CleanupOnRemove || string.IsNullOrEmpty(s.OutputPath))
                     continue;
 
-                string m3u8Path = Path.Combine(s.OutputPath, $"{SanitizeFilename(deleted.ListName)}.m3u8");
+                string fileName = SanitizeFilename(s.PrefixedName(message.ProviderId, deleted.ListName));
+                string m3u8Path = Path.Combine(s.OutputPath, $"{fileName}.m3u8");
                 if (File.Exists(m3u8Path))
                 {
                     _logger.Debug($"Deleting {m3u8Path} (import list removed)");
@@ -168,12 +169,13 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
     public void RefreshSchema()
     {
         List<IImportList> allLists = _importListFactory.GetAvailableProviders();
-        int order = 7;
+        int order = 8;
 
         List<FieldMapping> dynamicMappings = [];
         foreach (IImportList l in allLists)
         {
-            string key = $"list_{l.Definition.Id}";
+            int listId = l.Definition.Id;
+            string key = $"list_{listId}";
             dynamicMappings.Add(new FieldMapping
             {
                 Field = new Field
@@ -189,6 +191,25 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
                 PropertyType = typeof(bool),
                 GetterFunc = m => ((PlaylistExportSettings)m).GetBoolState(key),
                 SetterFunc = (m, v) => ((PlaylistExportSettings)m).SetBoolState(key, ToBoolean(v)),
+            });
+
+            // AIDEV-NOTE: named list_N_prefix so InjectDynamic's "list_" filter drops it along
+            // with the checkbox when the schema is rebuilt. Its value lives in PrefixJson, not
+            // StateJson, so GetSelectedListIds never sees it. JsonElement.ToString() is the bare
+            // string for a JSON string and "" for null, so no type-name matching as in ToBoolean.
+            dynamicMappings.Add(new FieldMapping
+            {
+                Field = new Field
+                {
+                    Name = $"{key}_prefix",
+                    Label = $"{l.Definition.Name} Prefix",
+                    Type = "textbox",
+                    HelpText = $"Put in front of every playlist name from '{l.Definition.Name}', followed by \" - \". Empty for none.",
+                    Order = order++,
+                },
+                PropertyType = typeof(string),
+                GetterFunc = m => ((PlaylistExportSettings)m).GetPrefix(listId),
+                SetterFunc = (m, v) => ((PlaylistExportSettings)m).SetPrefix(listId, v?.ToString()),
             });
         }
 
@@ -335,8 +356,10 @@ public sealed partial class PlaylistExportService : IPlaylistExportService,
                 }
             }
 
+            // Grouped by the bare name, prefixed only on write: two lists sharing a playlist
+            // with different prefixes get one file each rather than overwriting each other.
             foreach ((string playlistName, List<TrackFile> files) in byPlaylist)
-                WriteM3u8(outputPath, playlistName, files, settings.UseRelativePaths);
+                WriteM3u8(outputPath, settings.PrefixedName(listId, playlistName), files, settings.UseRelativePaths);
         }
     }
 
